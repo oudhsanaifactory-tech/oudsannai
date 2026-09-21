@@ -529,13 +529,6 @@ export type Database = {
         }
         Returns: boolean
       }
-      my_permissions: {
-        Args: never
-        Returns: {
-          action: Database["public"]["Enums"]["perm_action"]
-          module: string
-        }[]
-      }
     }
     Enums: {
       account_type: "asset" | "liability" | "equity" | "revenue" | "expense"
