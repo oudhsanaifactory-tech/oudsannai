@@ -1,5 +1,5 @@
 import { createFileRoute } from "@tanstack/react-router";
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import {
   ArrowDownRight,
   ArrowUpRight,
@@ -21,6 +21,9 @@ import {
   Users,
   X,
 } from "lucide-react";
+import { supabase } from "@/integrations/supabase/client";
+
+const INTERNAL_LOGIN_EMAIL = "oudhsannaifactory@gmail.com";
 
 // No head() here: the home route inherits title/description/og/twitter from
 // __root.tsx, and ships no og:image so serve-time hosting can inject the
@@ -29,8 +32,124 @@ export const Route = createFileRoute("/")({
   component: Index,
 });
 
-// IMPORTANT: Replace this placeholder. See ./README.md for routing conventions.
 function Index() {
+  return <AuthGate />;
+}
+
+function AuthGate() {
+  const [session, setSession] =
+    useState<Awaited<ReturnType<typeof supabase.auth.getSession>>["data"]["session"]>(null);
+  const [roleName, setRoleName] = useState("Auditor");
+  const [loading, setLoading] = useState(true);
+
+  useEffect(() => {
+    let mounted = true;
+    void supabase.auth.getSession().then(({ data }) => {
+      if (!mounted) return;
+      setSession(data.session);
+      setLoading(false);
+    });
+    const { data: listener } = supabase.auth.onAuthStateChange((_event, nextSession) => {
+      if (mounted) setSession(nextSession);
+    });
+    return () => {
+      mounted = false;
+      listener.subscription.unsubscribe();
+    };
+  }, []);
+
+  useEffect(() => {
+    if (!session?.user.id) return;
+    void supabase
+      .from("profiles")
+      .select("display_name, roles(name)")
+      .eq("id", session.user.id)
+      .maybeSingle()
+      .then(({ data }) => {
+        const role = data?.roles as { name?: string } | null;
+        if (role?.name) setRoleName(role.name);
+      });
+  }, [session?.user.id]);
+
+  if (loading) return <div className="auth-loading">Memuat sesi Anda...</div>;
+  if (!session) return <LoginPanel />;
+  return (
+    <Dashboard
+      email={session.user.email ?? ""}
+      roleName={roleName}
+      onSignOut={() => supabase.auth.signOut()}
+    />
+  );
+}
+
+function LoginPanel() {
+  const [password, setPassword] = useState("");
+  const [message, setMessage] = useState("");
+  const [busy, setBusy] = useState(false);
+
+  async function submit(event: React.FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    setBusy(true);
+    setMessage("");
+    const result = await supabase.auth.signInWithPassword({
+      email: INTERNAL_LOGIN_EMAIL,
+      password,
+    });
+    setMessage(result.error ? "Email atau password tidak valid." : "Login berhasil.");
+    setBusy(false);
+  }
+
+  return (
+    <main className="auth-page">
+      <section className="auth-card">
+        <div className="auth-brand">
+          <div className="erp-brand-mark">
+            <Store size={20} />
+          </div>
+          <span>
+            Oudh Sannai <small>Business System</small>
+          </span>
+        </div>
+        <div className="auth-heading">
+          <small>SECURE WORKSPACE</small>
+          <h1>Masuk ke workspace Anda</h1>
+          <p>Akses internal untuk mengelola operasi bisnis Oudh Sannai.</p>
+        </div>
+        <form onSubmit={submit} className="auth-form">
+          <label>
+            Akun internal
+            <input type="email" value={INTERNAL_LOGIN_EMAIL} readOnly aria-readonly="true" />
+          </label>
+          <label>
+            Password
+            <input
+              type="password"
+              required
+              autoComplete="current-password"
+              value={password}
+              onChange={(event) => setPassword(event.target.value)}
+              placeholder="Masukkan password"
+            />
+          </label>
+          {message && <p className="auth-message">{message}</p>}
+          <button className="erp-primary auth-submit" disabled={busy}>
+            {busy ? "Memproses..." : "Masuk"}
+          </button>
+        </form>
+      </section>
+    </main>
+  );
+}
+
+function Dashboard({
+  email,
+  roleName,
+  onSignOut,
+}: {
+  email: string;
+  roleName: string;
+  onSignOut: () => void;
+}) {
   const [activePage, setActivePage] = useState("Overview");
   const [period, setPeriod] = useState("Tahun ini");
   const [sidebarOpen, setSidebarOpen] = useState(false);
@@ -118,14 +237,14 @@ function Index() {
             <Settings size={17} />
             <span>Pengaturan</span>
           </button>
-          <div className="erp-profile">
+          <button className="erp-profile" onClick={onSignOut} title="Logout">
             <div>NA</div>
             <span>
-              <strong>Nurhadi Ahmad</strong>
-              <small>Administrator</small>
+              <strong>{email}</strong>
+              <small>{roleName} · Logout</small>
             </span>
             <ChevronDown size={14} />
-          </div>
+          </button>
         </div>
       </aside>
       {sidebarOpen && (
