@@ -1,5 +1,5 @@
 import { createFileRoute } from "@tanstack/react-router";
-import { useEffect, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 import {
   ArrowDownRight,
   ArrowUpRight,
@@ -61,13 +61,18 @@ function AuthGate() {
   useEffect(() => {
     if (!session?.user.id) return;
     void supabase
-      .from("profiles")
-      .select("display_name, roles(name)")
-      .eq("id", session.user.id)
+      .from("user_roles")
+      .select("role")
+      .eq("user_id", session.user.id)
+      .order("created_at", { ascending: true })
+      .limit(1)
       .maybeSingle()
       .then(({ data }) => {
-        const role = data?.roles as { name?: string } | null;
-        if (role?.name) setRoleName(role.name);
+        if (data?.role) {
+          setRoleName(
+            data.role.replace("_", " ").replace(/\b\w/g, (letter) => letter.toUpperCase()),
+          );
+        }
       });
   }, [session?.user.id]);
 
@@ -153,6 +158,7 @@ function Dashboard({
   const [activePage, setActivePage] = useState("Overview");
   const [period, setPeriod] = useState("Tahun ini");
   const [sidebarOpen, setSidebarOpen] = useState(false);
+  const [masterEntity, setMasterEntity] = useState<MasterEntity | null>(null);
 
   const navigation = [
     ["Overview", LayoutDashboard],
@@ -223,11 +229,11 @@ function Dashboard({
             </button>
           ))}
           <small className="nav-gap">Master Data</small>
-          <button>
+          <button onClick={() => setMasterEntity("customers")}>
             <Users size={17} />
             <span>Pelanggan & Pemasok</span>
           </button>
-          <button>
+          <button onClick={() => setMasterEntity("products")}>
             <PackageSearch size={17} />
             <span>Produk & Jasa</span>
           </button>
@@ -280,6 +286,9 @@ function Dashboard({
           </div>
         </header>
         <div className="erp-page">
+          {masterEntity && (
+            <MasterDataPanel entity={masterEntity} onClose={() => setMasterEntity(null)} />
+          )}
           <section className="erp-intro">
             <div>
               <small>Selasa, 24 September 2024</small>
@@ -528,6 +537,341 @@ function Dashboard({
         </div>
       </main>
     </div>
+  );
+}
+
+type MasterEntity = "customers" | "suppliers" | "products";
+type MasterRecord = {
+  id: string;
+  code?: string;
+  sku?: string;
+  name: string;
+  email?: string | null;
+  phone?: string | null;
+  description?: string | null;
+  purchase_price?: number;
+  selling_price?: number;
+  is_active?: boolean;
+};
+
+function MasterDataPanel({ entity, onClose }: { entity: MasterEntity; onClose: () => void }) {
+  const [records, setRecords] = useState<MasterRecord[]>([]);
+  const [editing, setEditing] = useState<MasterRecord | null>(null);
+  const [form, setForm] = useState({
+    code: "",
+    name: "",
+    email: "",
+    phone: "",
+    sku: "",
+    description: "",
+    purchase_price: "0",
+    selling_price: "0",
+  });
+  const [search, setSearch] = useState("");
+  const [units, setUnits] = useState<{ id: string; code: string; name: string }[]>([]);
+  const [unitId, setUnitId] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState("");
+
+  const title =
+    entity === "customers" ? "Pelanggan" : entity === "suppliers" ? "Pemasok" : "Produk & Jasa";
+  const isProduct = entity === "products";
+
+  const loadRecords = useCallback(async () => {
+    setBusy(true);
+    setError("");
+    const query = supabase.from(entity).select("*").order("name");
+    const { data, error: queryError } = await query;
+    if (queryError) setError(queryError.message);
+    else setRecords((data ?? []) as MasterRecord[]);
+    setBusy(false);
+  }, [entity]);
+
+  useEffect(() => {
+    void loadRecords();
+    if (entity === "products") {
+      void supabase
+        .from("units")
+        .select("id, code, name")
+        .eq("is_active", true)
+        .order("name")
+        .then(({ data }) => {
+          const nextUnits = data ?? [];
+          setUnits(nextUnits);
+          setUnitId((current) => current || nextUnits[0]?.id || "");
+        });
+    }
+  }, [entity, loadRecords]);
+
+  function startCreate() {
+    setEditing(null);
+    setForm({
+      code: "",
+      name: "",
+      email: "",
+      phone: "",
+      sku: "",
+      description: "",
+      purchase_price: "0",
+      selling_price: "0",
+    });
+  }
+
+  function startEdit(record: MasterRecord) {
+    setEditing(record);
+    setForm({
+      code: record.code ?? "",
+      name: record.name,
+      email: record.email ?? "",
+      phone: record.phone ?? "",
+      sku: record.sku ?? "",
+      description: record.description ?? "",
+      purchase_price: String(record.purchase_price ?? 0),
+      selling_price: String(record.selling_price ?? 0),
+    });
+  }
+
+  async function saveRecord(event: React.FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    if (
+      !form.name.trim() ||
+      (!isProduct && !form.code.trim()) ||
+      (isProduct && (!form.sku.trim() || !unitId))
+    ) {
+      setError(
+        isProduct ? "SKU, unit, dan nama produk wajib diisi." : "Kode dan nama wajib diisi.",
+      );
+      return;
+    }
+    setBusy(true);
+    setError("");
+    const payload = isProduct
+      ? {
+          sku: form.sku.trim(),
+          name: form.name.trim(),
+          unit_id: unitId,
+          description: form.description.trim() || null,
+          purchase_price: Number(form.purchase_price) || 0,
+          selling_price: Number(form.selling_price) || 0,
+        }
+      : {
+          code: form.code.trim(),
+          name: form.name.trim(),
+          email: form.email.trim() || null,
+          phone: form.phone.trim() || null,
+        };
+    const result = editing
+      ? await supabase.from(entity).update(payload).eq("id", editing.id)
+      : await supabase.from(entity).insert(payload);
+    if (result.error) setError(result.error.message);
+    else {
+      startCreate();
+      await loadRecords();
+    }
+    setBusy(false);
+  }
+
+  async function deleteRecord(record: MasterRecord) {
+    if (!window.confirm(`Hapus ${record.name}? Data ini tidak dapat dipulihkan.`)) return;
+    setBusy(true);
+    const { error: deleteError } = await supabase.from(entity).delete().eq("id", record.id);
+    if (deleteError) setError(deleteError.message);
+    else await loadRecords();
+    setBusy(false);
+  }
+
+  const filtered = records.filter((record) =>
+    `${record.name} ${record.code ?? record.sku ?? ""}`
+      .toLowerCase()
+      .includes(search.toLowerCase()),
+  );
+
+  return (
+    <section className="master-panel">
+      <div className="master-header">
+        <div>
+          <small>MASTER DATA</small>
+          <h2>{title}</h2>
+          <p>Data tersimpan langsung di Supabase dan mengikuti RLS.</p>
+        </div>
+        <button className="erp-icon" onClick={onClose} aria-label="Tutup master data">
+          <X size={18} />
+        </button>
+      </div>
+      <div className="master-toolbar">
+        <input
+          value={search}
+          onChange={(event) => setSearch(event.target.value)}
+          placeholder={`Cari ${title.toLowerCase()}...`}
+          aria-label={`Cari ${title}`}
+        />
+        <button className="erp-primary" onClick={startCreate}>
+          <Plus size={15} /> Tambah
+        </button>
+        <button className="erp-secondary" onClick={() => void loadRecords()} disabled={busy}>
+          Refresh
+        </button>
+      </div>
+      {error && <p className="master-error">{error}</p>}
+      <div className="master-content">
+        <div className="master-table-wrap">
+          <table>
+            <thead>
+              <tr>
+                <th>{isProduct ? "SKU" : "Kode"}</th>
+                <th>Nama</th>
+                <th>{isProduct ? "Harga jual" : "Email"}</th>
+                <th>Status</th>
+                <th>Aksi</th>
+              </tr>
+            </thead>
+            <tbody>
+              {filtered.map((record) => (
+                <tr key={record.id}>
+                  <td>{record.code ?? record.sku}</td>
+                  <td>
+                    <b>{record.name}</b>
+                  </td>
+                  <td>
+                    {isProduct
+                      ? `Rp ${(record.selling_price ?? 0).toLocaleString("id-ID")}`
+                      : record.email || "-"}
+                  </td>
+                  <td>
+                    <em className={`erp-status ${record.is_active === false ? "late" : "paid"}`}>
+                      {record.is_active === false ? "Nonaktif" : "Aktif"}
+                    </em>
+                  </td>
+                  <td>
+                    <button
+                      type="button"
+                      className="master-action"
+                      onClick={() => startEdit(record)}
+                    >
+                      Edit
+                    </button>
+                    <button
+                      type="button"
+                      className="master-action danger"
+                      onClick={() => void deleteRecord(record)}
+                    >
+                      Hapus
+                    </button>
+                  </td>
+                </tr>
+              ))}
+              {!filtered.length && (
+                <tr>
+                  <td colSpan={5} className="master-empty">
+                    Belum ada data.
+                  </td>
+                </tr>
+              )}
+            </tbody>
+          </table>
+        </div>
+        <form className="master-form" onSubmit={saveRecord}>
+          <h3>{editing ? "Edit data" : "Data baru"}</h3>
+          {isProduct ? (
+            <>
+              <label>
+                SKU
+                <input
+                  required
+                  value={form.sku}
+                  onChange={(event) => setForm({ ...form, sku: event.target.value })}
+                />
+              </label>
+              <label>
+                Unit
+                <select required value={unitId} onChange={(event) => setUnitId(event.target.value)}>
+                  <option value="">Pilih unit</option>
+                  {units.map((unit) => (
+                    <option key={unit.id} value={unit.id}>
+                      {unit.code} · {unit.name}
+                    </option>
+                  ))}
+                </select>
+              </label>
+            </>
+          ) : (
+            <label>
+              Kode
+              <input
+                required
+                value={form.code}
+                onChange={(event) => setForm({ ...form, code: event.target.value })}
+              />
+            </label>
+          )}
+          <label>
+            Nama
+            <input
+              required
+              value={form.name}
+              onChange={(event) => setForm({ ...form, name: event.target.value })}
+            />
+          </label>
+          {isProduct ? (
+            <>
+              <label>
+                Harga beli
+                <input
+                  type="number"
+                  min="0"
+                  step="0.01"
+                  value={form.purchase_price}
+                  onChange={(event) => setForm({ ...form, purchase_price: event.target.value })}
+                />
+              </label>
+              <label>
+                Harga jual
+                <input
+                  type="number"
+                  min="0"
+                  step="0.01"
+                  value={form.selling_price}
+                  onChange={(event) => setForm({ ...form, selling_price: event.target.value })}
+                />
+              </label>
+              <label>
+                Deskripsi
+                <textarea
+                  value={form.description}
+                  onChange={(event) => setForm({ ...form, description: event.target.value })}
+                />
+              </label>
+            </>
+          ) : (
+            <>
+              <label>
+                Email
+                <input
+                  type="email"
+                  value={form.email}
+                  onChange={(event) => setForm({ ...form, email: event.target.value })}
+                />
+              </label>
+              <label>
+                Telepon
+                <input
+                  value={form.phone}
+                  onChange={(event) => setForm({ ...form, phone: event.target.value })}
+                />
+              </label>
+            </>
+          )}
+          <div className="master-form-actions">
+            <button type="button" className="erp-secondary" onClick={startCreate}>
+              Bersihkan
+            </button>
+            <button className="erp-primary" disabled={busy}>
+              {editing ? "Simpan perubahan" : "Simpan"}
+            </button>
+          </div>
+        </form>
+      </div>
+    </section>
   );
 }
 
