@@ -173,6 +173,7 @@ function Dashboard({
   const [period, setPeriod] = useState("Tahun ini");
   const [sidebarOpen, setSidebarOpen] = useState(false);
   const [masterEntity, setMasterEntity] = useState<MasterEntity | null>(null);
+  const [inventoryTransactionOpen, setInventoryTransactionOpen] = useState(false);
   const [dashboardData, setDashboardData] = useState<DashboardData>(emptyDashboardData);
   const [dashboardLoading, setDashboardLoading] = useState(true);
   const [dashboardError, setDashboardError] = useState("");
@@ -285,6 +286,7 @@ function Dashboard({
               onClick={() => {
                 setActivePage(label);
                 setSidebarOpen(false);
+                if (label === "Persediaan") setInventoryTransactionOpen(true);
               }}
             >
               <Icon size={17} />
@@ -361,6 +363,12 @@ function Dashboard({
               onChanged={loadDashboardData}
             />
           )}
+          {inventoryTransactionOpen && (
+            <InventoryAdjustmentPanel
+              onClose={() => setInventoryTransactionOpen(false)}
+              onChanged={loadDashboardData}
+            />
+          )}
           <section className="erp-intro">
             <div>
               <small>Selasa, 24 September 2024</small>
@@ -371,7 +379,7 @@ function Dashboard({
               <button className="erp-secondary">
                 <FileText size={15} /> Export laporan
               </button>
-              <button className="erp-primary">
+              <button className="erp-primary" onClick={() => setInventoryTransactionOpen(true)}>
                 <Plus size={16} /> Transaksi baru
               </button>
             </div>
@@ -598,6 +606,265 @@ function Dashboard({
         </div>
       </main>
     </div>
+  );
+}
+
+type InventoryAdjustment = {
+  id: string;
+  doc_number: string;
+  doc_date: string;
+  warehouse_id: string;
+  reason: string;
+  status: string;
+  notes: string | null;
+  warehouses: { code: string; name: string } | null;
+};
+type InventoryAdjustmentItem = {
+  id?: string;
+  product_id: string;
+  qty_change: number;
+  notes?: string | null;
+  products?: { sku: string; name: string } | null;
+};
+
+function InventoryAdjustmentPanel({
+  onClose,
+  onChanged,
+}: {
+  onClose: () => void;
+  onChanged: () => Promise<void>;
+}) {
+  const [records, setRecords] = useState<InventoryAdjustment[]>([]);
+  const [products, setProducts] = useState<{ id: string; sku: string; name: string }[]>([]);
+  const [warehouses, setWarehouses] = useState<{ id: string; code: string; name: string }[]>([]);
+  const [editing, setEditing] = useState<InventoryAdjustment | null>(null);
+  const [items, setItems] = useState<InventoryAdjustmentItem[]>([]);
+  const [form, setForm] = useState({
+    doc_date: new Date().toISOString().slice(0, 10),
+    warehouse_id: "",
+    reason: "",
+    notes: "",
+    product_id: "",
+    qty_change: "",
+    item_notes: "",
+  });
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState("");
+
+  const loadRecords = useCallback(async () => {
+    setBusy(true);
+    setError("");
+    const { data, error: queryError } = await supabase
+      .from("stock_adjustments")
+      .select("*, warehouses(code, name)")
+      .order("doc_date", { ascending: false });
+    if (queryError) setError(queryError.message);
+    else setRecords((data ?? []) as unknown as InventoryAdjustment[]);
+    setBusy(false);
+  }, []);
+
+  useEffect(() => {
+    void loadRecords();
+    void Promise.all([
+      supabase.from("products").select("id, sku, name").eq("is_active", true).order("name"),
+      supabase.from("warehouses").select("id, code, name").eq("is_active", true).order("name"),
+    ]).then(([productResult, warehouseResult]) => {
+      if (productResult.error || warehouseResult.error) {
+        setError(productResult.error?.message ?? warehouseResult.error?.message ?? "Gagal memuat referensi.");
+        return;
+      }
+      setProducts(productResult.data ?? []);
+      setWarehouses(warehouseResult.data ?? []);
+      setForm((current) => ({
+        ...current,
+        warehouse_id: current.warehouse_id || warehouseResult.data?.[0]?.id || "",
+        product_id: current.product_id || productResult.data?.[0]?.id || "",
+      }));
+    });
+  }, [loadRecords]);
+
+  function resetForm() {
+    setEditing(null);
+    setItems([]);
+    setForm({
+      doc_date: new Date().toISOString().slice(0, 10),
+      warehouse_id: warehouses[0]?.id || "",
+      reason: "",
+      notes: "",
+      product_id: products[0]?.id || "",
+      qty_change: "",
+      item_notes: "",
+    });
+  }
+
+  async function selectRecord(record: InventoryAdjustment) {
+    setError("");
+    const { data, error: itemError } = await supabase
+      .from("stock_adjustment_items")
+      .select("id, product_id, qty_change, notes, products(sku, name)")
+      .eq("adjustment_id", record.id)
+      .order("id");
+    if (itemError) {
+      setError(itemError.message);
+      return;
+    }
+    setEditing(record);
+    setItems((data ?? []) as unknown as InventoryAdjustmentItem[]);
+    setForm({
+      doc_date: record.doc_date,
+      warehouse_id: record.warehouse_id,
+      reason: record.reason,
+      notes: record.notes ?? "",
+      product_id: products[0]?.id || "",
+      qty_change: "",
+      item_notes: "",
+    });
+  }
+
+  function addItem() {
+    const qty = Number(form.qty_change);
+    if (!form.product_id || !Number.isFinite(qty) || qty === 0) {
+      setError("Pilih produk dan isi perubahan stok selain 0.");
+      return;
+    }
+    const product = products.find((item) => item.id === form.product_id);
+    setItems((current) => [
+      ...current.filter((item) => item.product_id !== form.product_id),
+      { product_id: form.product_id, qty_change: qty, notes: form.item_notes || null, products: product },
+    ]);
+    setForm((current) => ({ ...current, qty_change: "", item_notes: "" }));
+    setError("");
+  }
+
+  async function saveDraft(event: React.FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    if (!form.warehouse_id || !form.reason.trim() || !items.length) {
+      setError("Gudang, alasan, dan minimal satu item wajib diisi.");
+      return;
+    }
+    setBusy(true);
+    setError("");
+    const header = {
+      doc_date: form.doc_date,
+      warehouse_id: form.warehouse_id,
+      reason: form.reason.trim(),
+      notes: form.notes.trim() || null,
+    };
+    let adjustmentId = editing?.id;
+    const headerResult = editing
+      ? await supabase.from("stock_adjustments").update(header).eq("id", editing.id)
+      : await supabase
+          .from("stock_adjustments")
+          .insert({ ...header, doc_number: `ADJ-${Date.now()}` })
+          .select("id")
+          .single();
+    if (headerResult.error) {
+      setError(headerResult.error.message);
+      setBusy(false);
+      return;
+    }
+    adjustmentId = adjustmentId ?? (headerResult.data as { id: string }).id;
+    if (editing) await supabase.from("stock_adjustment_items").delete().eq("adjustment_id", editing.id);
+    const itemResult = await supabase.from("stock_adjustment_items").insert(
+      items.map((item) => ({
+        adjustment_id: adjustmentId,
+        product_id: item.product_id,
+        qty_change: item.qty_change,
+        notes: item.notes ?? null,
+      })),
+    );
+    if (itemResult.error) setError(itemResult.error.message);
+    else {
+      resetForm();
+      await loadRecords();
+      await onChanged();
+    }
+    setBusy(false);
+  }
+
+  async function applyRecord(record: InventoryAdjustment) {
+    if (!window.confirm(`Proses ${record.doc_number}? Stok akan berubah dan transaksi tidak dapat diedit.`)) return;
+    setBusy(true);
+    const { error: applyError } = await supabase.rpc("apply_stock_adjustment", { _id: record.id });
+    if (applyError) setError(applyError.message);
+    else {
+      await loadRecords();
+      await onChanged();
+    }
+    setBusy(false);
+  }
+
+  async function deleteRecord(record: InventoryAdjustment) {
+    if (record.status !== "draft") return;
+    if (!window.confirm(`Hapus ${record.doc_number}?`)) return;
+    setBusy(true);
+    const { error: deleteError } = await supabase.from("stock_adjustments").delete().eq("id", record.id);
+    if (deleteError) setError(deleteError.message);
+    else {
+      if (editing?.id === record.id) resetForm();
+      await loadRecords();
+    }
+    setBusy(false);
+  }
+
+  return (
+    <section className="master-panel inventory-panel">
+      <div className="master-header">
+        <div>
+          <small>TRANSAKSI PERSEDIAAN</small>
+          <h2>Penyesuaian stok</h2>
+          <p>Draft tersimpan di Supabase. Proses transaksi akan memperbarui saldo stok.</p>
+        </div>
+        <button className="erp-icon" onClick={onClose} aria-label="Tutup transaksi persediaan">
+          <X size={18} />
+        </button>
+      </div>
+      <div className="master-toolbar">
+        <button className="erp-primary" onClick={resetForm}><Plus size={15} /> Transaksi baru</button>
+        <button className="erp-secondary" onClick={() => void loadRecords()} disabled={busy}>Refresh</button>
+      </div>
+      {error && <p className="master-error">{error}</p>}
+      <div className="master-content">
+        <div className="master-table-wrap">
+          <table>
+            <thead><tr><th>Nomor</th><th>Tanggal</th><th>Gudang</th><th>Alasan</th><th>Status</th><th>Aksi</th></tr></thead>
+            <tbody>
+              {records.map((record) => (
+                <tr key={record.id}>
+                  <td><b>{record.doc_number}</b></td>
+                  <td>{formatDate(record.doc_date)}</td>
+                  <td>{record.warehouses?.name ?? "-"}</td>
+                  <td>{record.reason}</td>
+                  <td><em className={`erp-status ${record.status === "draft" ? "waiting" : "paid"}`}>{record.status}</em></td>
+                  <td>
+                    {record.status === "draft" && <button type="button" className="master-action" onClick={() => void selectRecord(record)}>Edit</button>}
+                    {record.status === "draft" && <button type="button" className="master-action" onClick={() => void applyRecord(record)}>Proses</button>}
+                    {record.status === "draft" && <button type="button" className="master-action danger" onClick={() => void deleteRecord(record)}>Hapus</button>}
+                  </td>
+                </tr>
+              ))}
+              {!records.length && <tr><td colSpan={6} className="master-empty">Belum ada transaksi persediaan.</td></tr>}
+            </tbody>
+          </table>
+        </div>
+        <form className="master-form" onSubmit={saveDraft}>
+          <h3>{editing ? `Edit ${editing.doc_number}` : "Draft penyesuaian"}</h3>
+          <label>Tanggal<input type="date" required value={form.doc_date} disabled={editing?.status !== "draft" && Boolean(editing)} onChange={(event) => setForm({ ...form, doc_date: event.target.value })} /></label>
+          <label>Gudang<select required value={form.warehouse_id} onChange={(event) => setForm({ ...form, warehouse_id: event.target.value })}>{warehouses.map((warehouse) => <option key={warehouse.id} value={warehouse.id}>{warehouse.code} · {warehouse.name}</option>)}</select></label>
+          <label>Alasan<input required value={form.reason} onChange={(event) => setForm({ ...form, reason: event.target.value })} placeholder="Contoh: Barang rusak" /></label>
+          <label>Catatan<textarea value={form.notes} onChange={(event) => setForm({ ...form, notes: event.target.value })} /></label>
+          <div className="inventory-item-entry">
+            <label>Produk<select value={form.product_id} onChange={(event) => setForm({ ...form, product_id: event.target.value })}>{products.map((product) => <option key={product.id} value={product.id}>{product.sku} · {product.name}</option>)}</select></label>
+            <label>Perubahan qty<input type="number" step="0.0001" value={form.qty_change} onChange={(event) => setForm({ ...form, qty_change: event.target.value })} placeholder="+ masuk / - keluar" /></label>
+            <button type="button" className="erp-secondary" onClick={addItem}>Tambah item</button>
+          </div>
+          <div className="inventory-items">
+            {items.map((item) => <div className="inventory-item" key={item.product_id}><span><b>{item.products?.name ?? products.find((product) => product.id === item.product_id)?.name}</b><small>{item.products?.sku ?? ""}</small></span><strong className={item.qty_change > 0 ? "positive" : "negative"}>{item.qty_change > 0 ? "+" : ""}{item.qty_change}</strong><button type="button" className="master-action danger" onClick={() => setItems((current) => current.filter((entry) => entry.product_id !== item.product_id))}>Hapus</button></div>)}
+          </div>
+          <div className="master-form-actions"><button type="button" className="erp-secondary" onClick={resetForm}>Bersihkan</button><button className="erp-primary" disabled={busy || editing?.status !== "draft"}>{editing ? "Simpan perubahan" : "Simpan draft"}</button></div>
+        </form>
+      </div>
+    </section>
   );
 }
 
