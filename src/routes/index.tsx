@@ -661,8 +661,8 @@ function MasterDataPanel({ entity, onClose }: { entity: MasterEntity; onClose: (
           phone: form.phone.trim() || null,
         };
     const result = editing
-      ? await supabase.from(entity).update(payload).eq("id", editing.id)
-      : await supabase.from(entity).insert(payload);
+      ? await supabase.from(entity).update(payload as never).eq("id", editing.id)
+      : await supabase.from(entity).insert(payload as never);
     if (result.error) setError(result.error.message);
     else {
       startCreate();
