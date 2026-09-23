@@ -455,7 +455,7 @@ function Dashboard({
                     <i />
                   </div>
                   <div className="erp-bars">
-                    {sales.map((value, index) => (
+                    {dashboardData.sales.map((value, index) => (
                       <div className="erp-bar-wrap" key={months[index]}>
                         <div
                           className="erp-bar"
