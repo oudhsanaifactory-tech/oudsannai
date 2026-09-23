@@ -24,6 +24,20 @@ import {
 import { supabase } from "@/integrations/supabase/client";
 
 const INTERNAL_LOGIN_EMAIL = "oudhsannaifactory@gmail.com";
+const DASHBOARD_MONTHS = [
+  "Jan",
+  "Feb",
+  "Mar",
+  "Apr",
+  "Mei",
+  "Jun",
+  "Jul",
+  "Agu",
+  "Sep",
+  "Okt",
+  "Nov",
+  "Des",
+] as const;
 
 // No head() here: the home route inherits title/description/og/twitter from
 // __root.tsx, and ships no og:image so serve-time hosting can inject the
@@ -159,6 +173,9 @@ function Dashboard({
   const [period, setPeriod] = useState("Tahun ini");
   const [sidebarOpen, setSidebarOpen] = useState(false);
   const [masterEntity, setMasterEntity] = useState<MasterEntity | null>(null);
+  const [dashboardData, setDashboardData] = useState<DashboardData>(emptyDashboardData);
+  const [dashboardLoading, setDashboardLoading] = useState(true);
+  const [dashboardError, setDashboardError] = useState("");
 
   const navigation = [
     ["Overview", LayoutDashboard],
@@ -169,21 +186,68 @@ function Dashboard({
     ["Laporan", BarChart3],
   ] as const;
 
-  const sales = [46, 58, 51, 67, 61, 78, 72, 88, 81, 94, 87, 100];
-  const months = [
-    "Jan",
-    "Feb",
-    "Mar",
-    "Apr",
-    "Mei",
-    "Jun",
-    "Jul",
-    "Agu",
-    "Sep",
-    "Okt",
-    "Nov",
-    "Des",
-  ];
+  const months = DASHBOARD_MONTHS;
+
+  const loadDashboardData = useCallback(async () => {
+    setDashboardLoading(true);
+    setDashboardError("");
+    const yearStart = `${new Date().getFullYear()}-01-01`;
+    const [invoiceResult, receivableResult, stockResult, productResult] = await Promise.all([
+      supabase
+        .from("sales_invoices")
+        .select(
+          "doc_number, doc_date, grand_total, paid_amount, payment_status, status, customers(name)",
+        )
+        .eq("status", "posted")
+        .gte("doc_date", yearStart)
+        .order("doc_date", { ascending: false }),
+      supabase.from("v_ar_aging").select("outstanding").order("days_overdue", { ascending: false }),
+      supabase
+        .from("v_stock_balances")
+        .select("product_name, sku, qty_on_hand, min_stock, stock_status, stock_value, unit_code")
+        .order("stock_status")
+        .order("qty_on_hand"),
+      supabase.from("products").select("id", { count: "exact", head: true }).eq("is_active", true),
+    ]);
+
+    const firstError =
+      invoiceResult.error ?? receivableResult.error ?? stockResult.error ?? productResult.error;
+    if (firstError) {
+      setDashboardError(firstError.message);
+      setDashboardLoading(false);
+      return;
+    }
+
+    const invoices = (invoiceResult.data ?? []) as unknown as DashboardInvoice[];
+    const receivables = (receivableResult.data ?? []) as unknown as DashboardReceivable[];
+    const stock = (stockResult.data ?? []) as unknown as DashboardStock[];
+    const monthlySales = months.map((month, index) =>
+      invoices
+        .filter((invoice) => new Date(invoice.doc_date).getMonth() === index)
+        .reduce((total, invoice) => total + Number(invoice.grand_total || 0), 0),
+    );
+    const maxMonthlySales = Math.max(...monthlySales, 1);
+
+    setDashboardData({
+      salesTotal: invoices.reduce((total, invoice) => total + Number(invoice.grand_total || 0), 0),
+      orderCount: invoices.length,
+      receivableTotal: receivables.reduce(
+        (total, item) => total + Number(item.outstanding || 0),
+        0,
+      ),
+      inventoryValue: stock.reduce((total, item) => total + Number(item.stock_value || 0), 0),
+      activeProducts: productResult.count ?? 0,
+      sales: monthlySales.map((value) => (value / maxMonthlySales) * 100),
+      monthlySales,
+      recentInvoices: invoices.slice(0, 4),
+      lowStock: stock.filter((item) => item.stock_status !== "aman").slice(0, 4),
+    });
+    setDashboardLoading(false);
+  }, [months]);
+
+  useEffect(() => {
+    void loadDashboardData();
+  }, [loadDashboardData]);
 
   return (
     <div className="erp-shell">
@@ -231,7 +295,11 @@ function Dashboard({
           <small className="nav-gap">Master Data</small>
           <button onClick={() => setMasterEntity("customers")}>
             <Users size={17} />
-            <span>Pelanggan & Pemasok</span>
+            <span>Pelanggan</span>
+          </button>
+          <button onClick={() => setMasterEntity("suppliers")}>
+            <Truck size={17} />
+            <span>Pemasok</span>
           </button>
           <button onClick={() => setMasterEntity("products")}>
             <PackageSearch size={17} />
@@ -287,7 +355,11 @@ function Dashboard({
         </header>
         <div className="erp-page">
           {masterEntity && (
-            <MasterDataPanel entity={masterEntity} onClose={() => setMasterEntity(null)} />
+            <MasterDataPanel
+              entity={masterEntity}
+              onClose={() => setMasterEntity(null)}
+              onChanged={loadDashboardData}
+            />
           )}
           <section className="erp-intro">
             <div>
@@ -308,34 +380,34 @@ function Dashboard({
             <Metric
               icon={CircleDollarSign}
               label="Total penjualan"
-              value="Rp 284,6 jt"
-              change="12,8%"
-              detail="vs. periode sebelumnya"
+              value={formatCurrency(dashboardData.salesTotal)}
+              change={dashboardLoading ? "..." : `${dashboardData.orderCount} invoice`}
+              detail="tahun berjalan"
               color="green"
             />
             <Metric
               icon={ShoppingCart}
               label="Pesanan masuk"
-              value="186"
-              change="8,4%"
-              detail="vs. periode sebelumnya"
+              value={dashboardData.orderCount.toLocaleString("id-ID")}
+              change={dashboardLoading ? "..." : "terposting"}
+              detail="invoice tahun berjalan"
               color="blue"
             />
             <Metric
               icon={FileText}
               label="Piutang usaha"
-              value="Rp 92,4 jt"
-              change="4,2%"
-              detail="lebih rendah dari bulan lalu"
+              value={formatCurrency(dashboardData.receivableTotal)}
+              change={dashboardLoading ? "..." : "aktif"}
+              detail="saldo belum tertagih"
               color="amber"
               down
             />
             <Metric
               icon={Boxes}
               label="Nilai persediaan"
-              value="Rp 418,2 jt"
-              change="2,1%"
-              detail="dari 248 produk aktif"
+              value={formatCurrency(dashboardData.inventoryValue)}
+              change={dashboardLoading ? "..." : `${dashboardData.activeProducts} produk`}
+              detail="nilai stok saat ini"
               color="red"
             />
           </section>
@@ -388,7 +460,7 @@ function Dashboard({
                         <div
                           className="erp-bar"
                           style={{ height: `${value}%` }}
-                          title={`${months[index]}: Rp ${value} jt`}
+                          title={`${months[index]}: ${formatCurrency(dashboardData.monthlySales[index])}`}
                         />
                         <span>{months[index]}</span>
                       </div>
@@ -398,10 +470,12 @@ function Dashboard({
               </div>
               <div className="erp-chart-footer">
                 <span>
-                  <b>Rp 284,6 jt</b> total penjualan
+                  <b>{formatCurrency(dashboardData.salesTotal)}</b> total penjualan
                 </span>
                 <strong>
-                  <ArrowUpRight size={14} /> 12,8% dari bulan lalu
+                  {dashboardLoading
+                    ? "Memuat data..."
+                    : `${dashboardData.orderCount} invoice terposting`}
                 </strong>
               </div>
             </div>
@@ -447,54 +521,32 @@ function Dashboard({
                     </tr>
                   </thead>
                   <tbody>
-                    {[
-                      [
-                        "INV-2024-0918",
-                        "PT Sumber Jaya",
-                        "18 Sep 2024",
-                        "Rp 24.850.000",
-                        "Lunas",
-                        "paid",
-                      ],
-                      [
-                        "INV-2024-0917",
-                        "CV Berkah Abadi",
-                        "17 Sep 2024",
-                        "Rp 18.420.000",
-                        "Menunggu",
-                        "waiting",
-                      ],
-                      [
-                        "INV-2024-0916",
-                        "Toko Makmur",
-                        "16 Sep 2024",
-                        "Rp 9.875.000",
-                        "Lunas",
-                        "paid",
-                      ],
-                      [
-                        "INV-2024-0915",
-                        "PT Arunika Niaga",
-                        "15 Sep 2024",
-                        "Rp 32.100.000",
-                        "Jatuh tempo",
-                        "late",
-                      ],
-                    ].map(([number, customer, date, amount, status, tone]) => (
-                      <tr key={number}>
-                        <td>
-                          <b>{number}</b>
-                        </td>
-                        <td>{customer}</td>
-                        <td>{date}</td>
-                        <td>
-                          <b>{amount}</b>
-                        </td>
-                        <td>
-                          <em className={`erp-status ${tone}`}>{status}</em>
+                    {dashboardData.recentInvoices.map((invoice) => {
+                      const status = invoice.payment_status === "paid" ? "Lunas" : "Belum lunas";
+                      const tone = invoice.payment_status === "paid" ? "paid" : "waiting";
+                      return (
+                        <tr key={invoice.doc_number}>
+                          <td>
+                            <b>{invoice.doc_number}</b>
+                          </td>
+                          <td>{invoice.customers?.name ?? "-"}</td>
+                          <td>{formatDate(invoice.doc_date)}</td>
+                          <td>
+                            <b>{formatCurrency(invoice.grand_total)}</b>
+                          </td>
+                          <td>
+                            <em className={`erp-status ${tone}`}>{status}</em>
+                          </td>
+                        </tr>
+                      );
+                    })}
+                    {!dashboardData.recentInvoices.length && (
+                      <tr>
+                        <td colSpan={5} className="master-empty">
+                          Belum ada invoice terposting.
                         </td>
                       </tr>
-                    ))}
+                    )}
                   </tbody>
                 </table>
               </div>
@@ -506,34 +558,43 @@ function Dashboard({
                 </button>
               </PanelTitle>
               <div className="erp-stock-list">
-                {[
-                  ["Kopi Arabika Premium 250g", "PRD-00124", "12 pcs", "low"],
-                  ["Teh Hijau Organik 100g", "PRD-00087", "28 pcs", "medium"],
-                  ["Gula Aren Kristal 500g", "PRD-00102", "6 pcs", "critical"],
-                ].map(([name, sku, stock, level]) => (
-                  <div className="erp-stock" key={sku}>
-                    <div className={`erp-stock-icon ${level}`}>
-                      <Boxes size={16} />
+                {dashboardData.lowStock.map((item) => {
+                  const level =
+                    item.stock_status === "habis"
+                      ? "critical"
+                      : item.stock_status === "minimum"
+                        ? "low"
+                        : "medium";
+                  return (
+                    <div className="erp-stock" key={`${item.sku}-${item.product_name}`}>
+                      <div className={`erp-stock-icon ${level}`}>
+                        <Boxes size={16} />
+                      </div>
+                      <span>
+                        <b>{item.product_name}</b>
+                        <small>{item.sku}</small>
+                      </span>
+                      <strong className={level}>
+                        {Number(item.qty_on_hand || 0).toLocaleString("id-ID")}{" "}
+                        {item.unit_code ?? "unit"}
+                        <small>
+                          {level === "critical"
+                            ? "Kritis"
+                            : level === "low"
+                              ? "Menipis"
+                              : "Perhatian"}
+                        </small>
+                      </strong>
                     </div>
-                    <span>
-                      <b>{name}</b>
-                      <small>{sku}</small>
-                    </span>
-                    <strong className={level}>
-                      {stock}
-                      <small>
-                        {level === "critical"
-                          ? "Kritis"
-                          : level === "low"
-                            ? "Menipis"
-                            : "Perhatian"}
-                      </small>
-                    </strong>
-                  </div>
-                ))}
+                  );
+                })}
+                {!dashboardData.lowStock.length && <p className="master-empty">Semua stok aman.</p>}
               </div>
             </div>
           </section>
+          {dashboardError && (
+            <p className="master-error">Gagal memuat data dashboard: {dashboardError}</p>
+          )}
         </div>
       </main>
     </div>
@@ -541,6 +602,60 @@ function Dashboard({
 }
 
 type MasterEntity = "customers" | "suppliers" | "products";
+type DashboardInvoice = {
+  doc_number: string;
+  doc_date: string;
+  grand_total: number;
+  paid_amount: number;
+  payment_status: string;
+  status: string;
+  customers: { name: string } | null;
+};
+type DashboardReceivable = { outstanding: number | null };
+type DashboardStock = {
+  product_name: string | null;
+  sku: string | null;
+  qty_on_hand: number | null;
+  min_stock: number | null;
+  stock_status: string | null;
+  stock_value: number | null;
+  unit_code: string | null;
+};
+type DashboardData = {
+  salesTotal: number;
+  orderCount: number;
+  receivableTotal: number;
+  inventoryValue: number;
+  activeProducts: number;
+  sales: number[];
+  monthlySales: number[];
+  recentInvoices: DashboardInvoice[];
+  lowStock: DashboardStock[];
+};
+const emptyDashboardData: DashboardData = {
+  salesTotal: 0,
+  orderCount: 0,
+  receivableTotal: 0,
+  inventoryValue: 0,
+  activeProducts: 0,
+  sales: Array(12).fill(0),
+  monthlySales: Array(12).fill(0),
+  recentInvoices: [],
+  lowStock: [],
+};
+
+function formatCurrency(value: number) {
+  return `Rp ${value.toLocaleString("id-ID", { maximumFractionDigits: 0 })}`;
+}
+
+function formatDate(value: string) {
+  return new Date(value).toLocaleDateString("id-ID", {
+    day: "2-digit",
+    month: "short",
+    year: "numeric",
+  });
+}
+
 type MasterRecord = {
   id: string;
   code?: string;
@@ -554,7 +669,15 @@ type MasterRecord = {
   is_active?: boolean;
 };
 
-function MasterDataPanel({ entity, onClose }: { entity: MasterEntity; onClose: () => void }) {
+function MasterDataPanel({
+  entity,
+  onClose,
+  onChanged,
+}: {
+  entity: MasterEntity;
+  onClose: () => void;
+  onChanged: () => Promise<void>;
+}) {
   const [records, setRecords] = useState<MasterRecord[]>([]);
   const [editing, setEditing] = useState<MasterRecord | null>(null);
   const [form, setForm] = useState({
@@ -661,12 +784,16 @@ function MasterDataPanel({ entity, onClose }: { entity: MasterEntity; onClose: (
           phone: form.phone.trim() || null,
         };
     const result = editing
-      ? await supabase.from(entity).update(payload as never).eq("id", editing.id)
+      ? await supabase
+          .from(entity)
+          .update(payload as never)
+          .eq("id", editing.id)
       : await supabase.from(entity).insert(payload as never);
     if (result.error) setError(result.error.message);
     else {
       startCreate();
       await loadRecords();
+      await onChanged();
     }
     setBusy(false);
   }
@@ -676,7 +803,10 @@ function MasterDataPanel({ entity, onClose }: { entity: MasterEntity; onClose: (
     setBusy(true);
     const { error: deleteError } = await supabase.from(entity).delete().eq("id", record.id);
     if (deleteError) setError(deleteError.message);
-    else await loadRecords();
+    else {
+      await loadRecords();
+      await onChanged();
+    }
     setBusy(false);
   }
 
